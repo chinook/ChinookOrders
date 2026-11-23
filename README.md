@@ -8,6 +8,8 @@ Application de bureau (Windows) du club Chinook (ÉTS) pour **lister les pièces
 - Flux : En attente → Approuvé (ou Refusé) → Commandé. Modifier une pièce la remet « En attente ».
 - « Grouper par site » regroupe les pièces par fournisseur pour commander site par site ; le lien s'ouvre dans le navigateur.
 - Rôles : **Membre** (son département), **Approbateur** (voit tout, approuve/refuse, marque « commandé »), **Administrateur** (en plus : utilisateurs, départements, emplacement des données).
+- Chaque pièce exige un **numéro de compte** (5 chiffres, avec un bouton qui ouvre le PDF « Liste des numéros de compte » dans un pop-up) et une **description** obligatoire de 200 caractères max.
+- Rôle **Générateur de fiches de dépenses** : consulte les numéros de référence déjà utilisés (CHI26XX) et en génère un nouveau (+1). Les anciens numéros peuvent être saisis à la main pour reprendre l'historique. Un administrateur a aussi ce droit.
 - Thème clair/sombre selon Windows, fonctionne hors ligne.
 
 ## Technologies

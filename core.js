@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const DB_NAME = 'chinook-orders.json';
-const ROLES = ['membre', 'approbateur', 'admin'];
+const ROLES = ['membre', 'approbateur', 'admin', 'generateur'];
 const STATUSES = ['en_attente', 'approuve', 'refuse', 'commande'];
 
 let dataDir = null;
@@ -26,13 +26,22 @@ function checkPassword(pw, stored) {
 
 let db;
 function load() {
-  if (fs.existsSync(dbFile())) { db = JSON.parse(fs.readFileSync(dbFile(), 'utf8')); return; }
-  db = { departments: [{ id: uid(), name: 'Général' }], users: [], items: [] };
+  if (fs.existsSync(dbFile())) { db = JSON.parse(fs.readFileSync(dbFile(), 'utf8')); migrate(); return; }
+  db = { departments: [{ id: uid(), name: 'Général' }], users: [], items: [], expenseRefs: [] };
   db.users.push({
     id: uid(), username: 'admin', name: 'Administrateur', role: 'admin',
     departmentId: null, password: hashPassword('admin'), mustChangePassword: true,
   });
   save();
+}
+// Anciennes données : « note » devient « description » ; ajout des numéros de référence
+function migrate() {
+  db.expenseRefs = db.expenseRefs || [];
+  for (const i of db.items) {
+    if (i.description === undefined) { i.description = String(i.note || '').slice(0, 200); }
+    delete i.note;
+    if (i.accountNumber === undefined) i.accountNumber = '';
+  }
 }
 function save() {
   const tmp = dbFile() + '.tmp';
@@ -73,6 +82,7 @@ function cleanQty(v) {
 // ---------- Droits ----------
 const canApprove = (u) => u.role === 'approbateur' || u.role === 'admin';
 const isAdmin = (u) => u.role === 'admin';
+const canGenerateRefs = (u) => u.role === 'admin' || u.role === 'generateur';
 const canSeeDept = (u, deptId) => canApprove(u) || u.departmentId === deptId;
 const publicUser = (u) => ({
   id: u.id, username: u.username, name: u.name, role: u.role,
@@ -111,14 +121,55 @@ route('GET', '/api/state', ({ user }) => {
     items: db.items.filter((i) => canSeeDept(user, i.departmentId)),
     users: isAdmin(user) ? users : users.map(({ id, name }) => ({ id, name })),
     dataDir: isAdmin(user) ? dataDir : null,
+    expenseRefs: canGenerateRefs(user) ? db.expenseRefs : null,
   };
+});
+
+// --- Fiches de dépenses : numéros de référence CHI<AA><NN> (ex. CHI2600, CHI2601…) ---
+const REF_RE = /^CHI(\d{2})(\d{2,})$/;
+const parseRef = (ref) => { const m = REF_RE.exec(ref); return m && { prefix: 'CHI' + m[1], number: parseInt(m[2], 10) }; };
+const formatRef = (prefix, n) => prefix + String(n).padStart(2, '0');
+
+route('POST', '/api/refs/generate', ({ user }) => {
+  if (!canGenerateRefs(user)) throw forbidden();
+  const prefix = 'CHI' + String(new Date().getFullYear()).slice(-2);
+  const nums = db.expenseRefs.filter((r) => r.prefix === prefix).map((r) => r.number);
+  const entry = { id: uid(), prefix, number: nums.length ? Math.max(...nums) + 1 : 0, createdBy: user.id, createdAt: Date.now() };
+  entry.ref = formatRef(prefix, entry.number);
+  db.expenseRefs.push(entry);
+  save();
+  return entry;
+});
+// Saisir un ancien numéro déjà utilisé (avant l'application)
+route('POST', '/api/refs', ({ user, body }) => {
+  if (!canGenerateRefs(user)) throw forbidden();
+  const ref = str(body.ref, 20).toUpperCase();
+  const p = parseRef(ref);
+  if (!p) throw bad('Format attendu : CHI26XX (par ex. CHI2603).');
+  if (db.expenseRefs.some((r) => r.ref === ref)) throw bad('Ce numéro existe déjà.');
+  const entry = { id: uid(), ref, ...p, createdBy: user.id, createdAt: Date.now(), imported: true };
+  db.expenseRefs.push(entry);
+  save();
+  return entry;
+});
+route('DELETE', '/api/refs/:id', ({ user, params }) => {
+  if (!isAdmin(user)) throw forbidden();
+  if (!db.expenseRefs.some((r) => r.id === params.id)) throw notFound('Numéro introuvable.');
+  db.expenseRefs = db.expenseRefs.filter((r) => r.id !== params.id);
+  save();
+  return { ok: true };
 });
 
 // --- Articles ---
 function itemFields(body) {
   const name = str(body.name, 200);
   if (!name) throw bad('Le nom de la pièce est requis.');
-  return { name, url: cleanUrl(body.url), unitPrice: cleanPrice(body.unitPrice), quantity: cleanQty(body.quantity ?? 1), note: str(body.note, 500) };
+  const accountNumber = String(body.accountNumber ?? '').trim();
+  if (!/^\d{5}$/.test(accountNumber)) throw bad('Le numéro de compte est obligatoire (5 chiffres, voir la liste des numéros de compte).');
+  const description = typeof body.description === 'string' ? body.description.trim() : '';
+  if (!description) throw bad('La description est obligatoire.');
+  if (description.length > 200) throw bad('La description ne doit pas dépasser 200 caractères.');
+  return { name, accountNumber, description, url: cleanUrl(body.url), unitPrice: cleanPrice(body.unitPrice), quantity: cleanQty(body.quantity ?? 1) };
 }
 function findItem(id, user) {
   const item = db.items.find((i) => i.id === id);

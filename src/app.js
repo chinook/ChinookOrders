@@ -5,9 +5,9 @@ const money = (n) => new Intl.NumberFormat('fr-CA', { style: 'currency', currenc
 const dateFmt = (t) => new Date(t).toLocaleDateString('fr-CA');
 
 const STATUS_LABEL = { en_attente: 'En attente', approuve: 'Approuvé', refuse: 'Refusé', commande: 'Commandé' };
-const ROLE_LABEL = { membre: 'Membre', approbateur: 'Approbateur', admin: 'Administrateur' };
+const ROLE_LABEL = { membre: 'Membre', approbateur: 'Approbateur', admin: 'Administrateur', generateur: 'Générateur de fiches de dépenses' };
 
-const S = { me: null, departments: [], items: [], users: [], view: null, filter: 'tous', groupBySite: false };
+const S = { me: null, departments: [], items: [], users: [], expenseRefs: null, view: null, filter: 'tous', groupBySite: false };
 const root = document.getElementById('app');
 
 // ---------- Utilitaires ----------
@@ -36,13 +36,15 @@ async function api(method, url, body) {
 
 async function refresh() {
   Object.assign(S, await api('GET', '/api/state'));
-  const valid = (v) => v === 'all' || v === 'admin' || S.departments.some((d) => 'dept:' + d.id === v);
-  if (!valid(S.view) || (S.view === 'admin' && S.me.role !== 'admin')) {
-    S.view = canApprove() ? 'all' : (S.departments[0] ? 'dept:' + S.departments[0].id : 'all');
+  const valid = (v) => (v === 'all' && canApprove()) || (v === 'admin' && S.me.role === 'admin') || (v === 'refs' && canGenerate())
+    || S.departments.some((d) => 'dept:' + d.id === v);
+  if (!valid(S.view)) {
+    S.view = canApprove() ? 'all' : (S.departments[0] ? 'dept:' + S.departments[0].id : (canGenerate() ? 'refs' : 'all'));
   }
   render();
 }
 const canApprove = () => S.me && (S.me.role === 'approbateur' || S.me.role === 'admin');
+const canGenerate = () => S.me && (S.me.role === 'generateur' || S.me.role === 'admin');
 const userName = (id) => (S.users.find((u) => u.id === id) || {}).name || '—';
 const deptName = (id) => (S.departments.find((d) => d.id === id) || {}).name || '—';
 const lineTotal = (i) => i.unitPrice * i.quantity;
@@ -92,7 +94,21 @@ function dialog(title, body, { onSubmit, submitLabel = 'Enregistrer', cancel = t
   return dlg;
 }
 
+// Pop-up avec le PDF « Liste des numéros de compte » (se ferme pour revenir au formulaire)
+function pdfAccountsDialog() {
+  const dlg = h('dialog', { class: 'pdf-dlg' });
+  const close = () => { dlg.close(); dlg.remove(); };
+  dlg.append(
+    h('div', { class: 'pdf-head' }, h('h3', {}, 'Liste des numéros de compte'),
+      h('button', { type: 'button', class: 'btn', onclick: close }, 'Fermer')),
+    h('iframe', { src: 'docs/liste-comptes.pdf', title: 'Liste des numéros de compte', class: 'pdf-frame' }));
+  dlg.addEventListener('click', (e) => { if (e.target === dlg) close(); });
+  document.body.append(dlg);
+  dlg.showModal();
+}
+
 function itemDialog(item) {
+  const counter = h('div', { class: 'hint', style: 'text-align:right' });
   const currentDept = item ? item.departmentId : (S.view.startsWith('dept:') ? S.view.slice(5) : (S.me.departmentId || S.departments[0]?.id));
   const body = h('div', {},
     S.departments.length > 1 && h('label', {}, 'Département',
@@ -102,11 +118,20 @@ function itemDialog(item) {
     h('div', { class: 'grid2' },
       h('label', {}, 'Prix unitaire (hors livraison)', h('input', { name: 'unitPrice', type: 'number', step: '0.01', min: '0', required: true, value: item?.unitPrice ?? '' })),
       h('label', {}, 'Quantité', h('input', { name: 'quantity', type: 'number', min: '1', step: '1', required: true, value: item?.quantity ?? 1 }))),
-    h('label', {}, 'Note (facultatif)', h('textarea', { name: 'note', rows: 2, maxLength: 500, value: item?.note || '' })),
+    h('label', {}, 'Numéro de compte',
+      h('div', { class: 'inline' },
+        h('input', { name: 'accountNumber', required: true, maxLength: 5, pattern: '\\d{5}', inputMode: 'numeric', placeholder: '5 chiffres, ex. 54121', title: '5 chiffres', autocomplete: 'off', value: item?.accountNumber || '' }),
+        h('button', { type: 'button', class: 'btn', style: 'white-space:nowrap', onclick: pdfAccountsDialog }, 'Liste des comptes'))),
+    h('label', {}, 'Description (obligatoire, 200 caractères max.)',
+      h('textarea', { name: 'description', rows: 3, required: true, maxLength: 200, value: item?.description || '',
+        oninput: (e) => { counter.textContent = `${e.target.value.length} / 200`; } }),
+      counter),
     item && item.status !== 'en_attente' && h('p', { class: 'hint' }, 'Modifier cette pièce la remettra « En attente » d’approbation.'));
+  counter.textContent = `${(item?.description || '').length} / 200`;
   dialog(item ? 'Modifier la pièce' : 'Ajouter une pièce', body, {
     onSubmit: (f) => {
-      const payload = { name: f.name.value, url: f.url.value, unitPrice: f.unitPrice.value, quantity: f.quantity.value, note: f.note.value };
+      const payload = { name: f.name.value, url: f.url.value, unitPrice: f.unitPrice.value, quantity: f.quantity.value,
+        accountNumber: f.accountNumber.value, description: f.description.value };
       payload.departmentId = f.departmentId ? f.departmentId.value : currentDept;
       if (item) return api('PUT', '/api/items/' + item.id, payload);
       return api('POST', '/api/items', payload);
@@ -140,7 +165,7 @@ function userDialog(user) {
       h('label', {}, 'Département', h('select', { name: 'departmentId' },
         h('option', { value: '' }, '— Aucun —'),
         S.departments.map((d) => h('option', { value: d.id, selected: user?.departmentId === d.id }, d.name))))),
-    h('p', { class: 'hint' }, 'Membre : voit et alimente son département. Approbateur : voit tout, approuve/refuse et marque « commandé ». Administrateur : en plus, gère utilisateurs et départements.'));
+    h('p', { class: 'hint' }, 'Membre : voit et alimente son département. Approbateur : voit tout, approuve/refuse et marque « commandé ». Administrateur : en plus, gère utilisateurs et départements. Générateur de fiches de dépenses : génère les numéros de référence CHI26XX (aucun département requis).'));
   dialog(user ? 'Modifier ' + user.name : 'Nouvel utilisateur', body, {
     onSubmit: (f) => {
       const payload = { name: f.name.value, role: f.role.value, departmentId: f.departmentId.value, password: f.password.value };
@@ -162,7 +187,38 @@ function render() {
       h('button', { class: 'btn sm', title: 'Recharger les données (utile si le fichier est partagé)', onclick: () => run(async () => {}) }, 'Actualiser'),
       h('button', { class: 'btn sm', onclick: () => passwordDialog(false) }, 'Mot de passe'),
       h('button', { class: 'btn sm', onclick: async () => { await api('POST', '/api/logout'); S.me = null; renderLogin(); } }, 'Déconnexion')),
-    h('div', { class: 'layout' }, renderSide(), S.view === 'admin' ? renderAdmin() : renderItems()));
+    h('div', { class: 'layout' }, renderSide(), S.view === 'admin' ? renderAdmin() : S.view === 'refs' ? renderRefs() : renderItems()));
+}
+
+// ---------- Fiches de dépenses : numéros de référence ----------
+function renderRefs() {
+  const refs = (S.expenseRefs || []).slice().sort((a, b) => b.createdAt - a.createdAt);
+  const last = refs.slice().sort((a, b) => a.prefix === b.prefix ? b.number - a.number : b.prefix.localeCompare(a.prefix))[0];
+  const addInput = h('input', { placeholder: 'Ancien numéro, ex. CHI2603', maxLength: 20 });
+  return h('main', { class: 'main' },
+    h('div', { class: 'head' }, h('h2', {}, 'Fiches de dépenses'),
+      h('button', { class: 'btn primary', onclick: () => run(async () => {
+        const r = await api('POST', '/api/refs/generate');
+        alert('Nouveau numéro de référence : ' + r.ref);
+      }) }, '+ Générer un nouveau numéro')),
+    h('div', { class: 'totals' },
+      h('div', { class: 'tile main-total' }, h('div', { class: 'lbl' }, 'Dernier numéro utilisé'), h('div', { class: 'val' }, last ? last.ref : '—'),
+        h('div', { class: 'sub' }, 'Le prochain sera ' + nextRef(last))),
+      h('div', { class: 'tile' }, h('div', { class: 'lbl' }, 'Numéros enregistrés'), h('div', { class: 'val' }, refs.length))),
+    h('div', { class: 'panel' }, h('h3', {}, 'Anciens numéros de référence'),
+      refs.length === 0 ? h('div', { class: 'empty' }, 'Aucun numéro pour le moment.') : refs.map((r) => h('div', { class: 'row' },
+        h('strong', { class: 'ref' }, r.ref),
+        h('span', { class: 'grow note' }, `${dateFmt(r.createdAt)} · ${userName(r.createdBy)}${r.imported ? ' · ajouté manuellement' : ''}`),
+        S.me.role === 'admin' && h('button', { class: 'btn sm danger', onclick: () => { if (confirm(`Supprimer ${r.ref} ?`)) run(() => api('DELETE', '/api/refs/' + r.id)); } }, 'Supprimer')))),
+    h('div', { class: 'panel' }, h('h3', {}, 'Ajouter un numéro déjà utilisé'),
+      h('p', { class: 'note', style: 'margin:0 0 8px' }, 'Pour reprendre l’historique d’avant l’application : le prochain numéro généré continuera après le plus élevé.'),
+      h('form', { class: 'inline', onsubmit: (e) => { e.preventDefault(); if (addInput.value.trim()) run(() => api('POST', '/api/refs', { ref: addInput.value })); } },
+        addInput, h('button', { class: 'btn' }, 'Ajouter'))));
+}
+function nextRef(last) {
+  const yy = String(new Date().getFullYear()).slice(-2);
+  if (!last || last.prefix !== 'CHI' + yy) return 'CHI' + yy + '00';
+  return last.prefix + String(last.number + 1).padStart(2, '0');
 }
 
 function renderSide() {
@@ -179,6 +235,8 @@ function renderSide() {
     }, h('span', {}, '⏳ À approuver'), h('span', { class: 'badge en_attente' }, pending)),
     canApprove() && h('hr'),
     S.departments.map((d) => nav('dept:' + d.id, d.name, money(live(S.items.filter((i) => i.departmentId === d.id))))),
+    canGenerate() && (S.departments.length > 0) && h('hr'),
+    canGenerate() && nav('refs', '🧾 Fiches de dépenses', S.expenseRefs ? S.expenseRefs.length + ' n°' : null),
     S.me.role === 'admin' && h('hr'),
     S.me.role === 'admin' && nav('admin', '⚙ Administration'));
 }
@@ -307,13 +365,14 @@ function itemRow(i, showDept) {
 
   const meta = [
     showDept && deptName(i.departmentId),
+    i.accountNumber ? 'compte ' + i.accountNumber : 'compte non indiqué',
     'ajouté par ' + userName(i.createdBy) + ' le ' + dateFmt(i.createdAt),
     i.decidedBy && `${STATUS_LABEL[i.status].toLowerCase()} par ${userName(i.decidedBy)}`,
   ].filter(Boolean).join(' · ');
 
   return h('tr', { class: i.status },
     h('td', {}, h('div', { class: 'name' }, i.name),
-      i.note && h('div', { class: 'note' }, i.note),
+      i.description && h('div', { class: 'note' }, i.description),
       i.status === 'refuse' && i.rejectReason && h('div', { class: 'note keep' }, 'Motif : ' + i.rejectReason),
       h('div', { class: 'dept-tag' }, meta)),
     h('td', {}, i.url ? h('a', { href: i.url, target: '_blank', rel: 'noopener noreferrer' }, host(i.url) + ' ↗') : '—'),
