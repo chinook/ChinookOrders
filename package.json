@@ -1,0 +1,34 @@
+{
+  "name": "chinookorders",
+  "version": "1.0.0",
+  "description": "Application de bureau pour lister, approuver et suivre les pièces à commander par département (Chinook ÉTS).",
+  "main": "main.js",
+  "build": {
+    "appId": "ca.ets.chinook.orders",
+    "productName": "ChinookOrders",
+    "files": ["main.js", "core.js", "preload.js", "build/icon.png", "src/**"],
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "icon": "build/icon.png"
+    },
+    "directories": { "output": "release" },
+    "artifactName": "${productName} Setup ${version}.${ext}",
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "ChinookOrders"
+    }
+  },
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder"
+  },
+  "license": "UNLICENSED",
+  "private": true,
+  "devDependencies": {
+    "electron": "^44.7.0",
+    "electron-builder": "^26.15.3"
+  }
+}
