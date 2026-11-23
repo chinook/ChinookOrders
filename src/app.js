@@ -93,9 +93,9 @@ function dialog(title, body, { onSubmit, submitLabel = 'Enregistrer', cancel = t
 }
 
 function itemDialog(item) {
-  const currentDept = S.view.startsWith('dept:') ? S.view.slice(5) : (S.me.departmentId || S.departments[0]?.id);
+  const currentDept = item ? item.departmentId : (S.view.startsWith('dept:') ? S.view.slice(5) : (S.me.departmentId || S.departments[0]?.id));
   const body = h('div', {},
-    !item && S.departments.length > 1 && h('label', {}, 'Département',
+    S.departments.length > 1 && h('label', {}, 'Département',
       h('select', { name: 'departmentId' }, S.departments.map((d) => h('option', { value: d.id, selected: d.id === currentDept }, d.name)))),
     h('label', {}, 'Pièce / article', h('input', { name: 'name', required: true, maxLength: 200, value: item?.name || '' })),
     h('label', {}, 'Lien du produit', h('input', { name: 'url', type: 'text', placeholder: 'https://…', value: item?.url || '' })),
@@ -107,8 +107,8 @@ function itemDialog(item) {
   dialog(item ? 'Modifier la pièce' : 'Ajouter une pièce', body, {
     onSubmit: (f) => {
       const payload = { name: f.name.value, url: f.url.value, unitPrice: f.unitPrice.value, quantity: f.quantity.value, note: f.note.value };
-      if (item) return api('PUT', '/api/items/' + item.id, payload);
       payload.departmentId = f.departmentId ? f.departmentId.value : currentDept;
+      if (item) return api('PUT', '/api/items/' + item.id, payload);
       return api('POST', '/api/items', payload);
     },
   });
@@ -206,6 +206,7 @@ function renderItems() {
       tile('', 'En attente', money(sum(by('en_attente'))), count(by('en_attente').length)),
       tile('', 'Approuvé, à commander', money(sum(by('approuve'))), count(by('approuve').length)),
       tile('', 'Déjà commandé', money(sum(by('commande'))), count(by('commande').length))),
+    !deptId && S.view === 'all' && renderOverview(),
     h('div', { class: 'filters' },
       ['tous', 'en_attente', 'approuve', 'commande', 'refuse'].map((f) => h('button', {
         class: 'chip' + (S.filter === f ? ' active' : ''),
@@ -214,6 +215,68 @@ function renderItems() {
     shown.length === 0
       ? h('div', { class: 'tablewrap' }, h('div', { class: 'empty' }, 'Aucune pièce ici pour le moment.'))
       : renderTable(shown, !deptId));
+}
+
+// Courbe cumulée du coût (hors refusés) dans le temps : un seul tracé SVG, sans librairie.
+function sparkline(items) {
+  const W = 200, H = 46, pad = 3;
+  const pts = items.filter((i) => i.status !== 'refuse').sort((a, b) => a.createdAt - b.createdAt);
+  const span = h('span', { class: 'spark' });
+  if (pts.length < 2) { span.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><line x1="0" y1="${H - pad}" x2="${W}" y2="${H - pad}" class="spark-flat"/></svg>`; return span; }
+  let acc = 0;
+  const cum = pts.map((i) => (acc += lineTotal(i)));
+  const t0 = pts[0].createdAt, t1 = pts[pts.length - 1].createdAt || t0 + 1;
+  const x = (t) => (t1 === t0 ? W : ((t - t0) / (t1 - t0)) * W);
+  const y = (v) => H - pad - (v / acc) * (H - 2 * pad);
+  const line = pts.map((p, k) => `${k ? 'L' : 'M'}${x(p.createdAt).toFixed(1)},${y(cum[k]).toFixed(1)}`).join('');
+  span.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">`
+    + `<path d="${line}L${W},${H}L0,${H}Z" class="spark-area"/><path d="${line}" class="spark-line"/></svg>`;
+  return span;
+}
+
+// Vue d'ensemble : une carte par département (coût, pièces, statuts, évolution) + indicateurs clés.
+function renderOverview() {
+  if (S.departments.length === 0 || S.items.length === 0) return null;
+  const live = (items) => items.filter((i) => i.status !== 'refuse');
+  const globalCost = sum(live(S.items));
+  const stats = S.departments.map((d) => {
+    const items = S.items.filter((i) => i.departmentId === d.id);
+    const n = (s) => items.filter((i) => i.status === s).length;
+    return { d, items, cost: sum(live(items)), count: items.length,
+      st: { en_attente: n('en_attente'), approuve: n('approuve'), commande: n('commande'), refuse: n('refuse') } };
+  }).sort((a, b) => b.cost - a.cost);
+
+  const liveAll = live(S.items);
+  const decided = S.items.filter((i) => i.status !== 'en_attente');
+  const accepted = decided.filter((i) => i.status !== 'refuse').length;
+  const top = stats[0];
+  const kpi = (lbl, val, sub) => h('div', { class: 'tile' }, h('div', { class: 'lbl' }, lbl), h('div', { class: 'val' }, val), sub && h('div', { class: 'sub' }, sub));
+
+  const card = (s) => {
+    const pct = globalCost ? Math.round((s.cost / globalCost) * 100) : 0;
+    const total = s.count || 1;
+    return h('button', { class: 'dcard', title: `Ouvrir ${s.d.name}`, onclick: () => { S.view = 'dept:' + s.d.id; S.filter = 'tous'; render(); } },
+      h('div', { class: 'dc-head' }, h('span', { class: 'dc-name' }, s.d.name),
+        s.st.en_attente > 0 && h('span', { class: 'badge en_attente' }, s.st.en_attente + ' à approuver')),
+      h('div', { class: 'dc-main' }, h('span', { class: 'dc-cost' }, money(s.cost)), h('span', { class: 'dc-pct' }, pct + ' % du total')),
+      h('div', { class: 'dc-sub' }, `${s.count} pièce${s.count > 1 ? 's' : ''}`
+        + (s.count ? ` · moy. ${money(s.cost / Math.max(1, s.items.filter((i) => i.status !== 'refuse').length))}` : '')),
+      sparkline(s.items),
+      h('div', { class: 'stackbar', title: `En attente ${s.st.en_attente} · Approuvé ${s.st.approuve} · Commandé ${s.st.commande} · Refusé ${s.st.refuse}` },
+        ['en_attente', 'approuve', 'commande', 'refuse'].map((k) => s.st[k] > 0 && h('i', { class: k, style: `width:${(s.st[k] / total) * 100}%` }))));
+  };
+
+  return h('section', { class: 'overview' },
+    h('div', { class: 'totals' },
+      kpi('Départements actifs', stats.filter((s) => s.count > 0).length + ' / ' + stats.length, `${S.items.length} pièces au total`),
+      kpi('Coût moyen / pièce', money(liveAll.length ? globalCost / liveAll.length : 0), 'refusés exclus'),
+      kpi('Plus gros budget', top.d.name, money(top.cost)),
+      kpi("Taux d'approbation", decided.length ? Math.round((accepted / decided.length) * 100) + ' %' : '—', `${decided.length} décision${decided.length > 1 ? 's' : ''} prise${decided.length > 1 ? 's' : ''}`)),
+    h('h3', { class: 'ov-title' }, 'Par département'),
+    h('div', { class: 'dgrid' }, stats.map(card)),
+    h('div', { class: 'legend' },
+      ['en_attente', 'approuve', 'commande', 'refuse'].map((k) => h('span', {}, h('i', { class: k }), STATUS_LABEL[k])),
+      h('span', { class: 'note' }, '· courbe = coût cumulé dans le temps')));
 }
 
 function renderTable(items, showDept) {

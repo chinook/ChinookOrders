@@ -140,7 +140,13 @@ route('PUT', '/api/items/:id', ({ user, body, params }) => {
   const item = findItem(params.id, user);
   if (item.status === 'commande') throw bad('Une pièce déjà commandée ne peut plus être modifiée.');
   if (!canApprove(user) && (item.createdBy !== user.id || item.status === 'approuve')) throw forbidden();
-  Object.assign(item, itemFields(body));
+  const fields = itemFields(body);
+  if (body.departmentId && body.departmentId !== item.departmentId) {
+    if (!db.departments.some((d) => d.id === body.departmentId)) throw bad('Département invalide.');
+    if (!canSeeDept(user, body.departmentId)) throw forbidden();
+    item.departmentId = body.departmentId;
+  }
+  Object.assign(item, fields);
   if (item.status !== 'en_attente') {
     item.status = 'en_attente';
     delete item.decidedBy; delete item.decidedAt; delete item.rejectReason;
