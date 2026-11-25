@@ -7,7 +7,7 @@ const dateFmt = (t) => new Date(t).toLocaleDateString('fr-CA');
 const STATUS_LABEL = { en_attente: 'En attente', approuve: 'Approuvé', refuse: 'Refusé', commande: 'Commandé' };
 const ROLE_LABEL = { membre: 'Membre', approbateur: 'Approbateur', admin: 'Administrateur', generateur: 'Générateur de fiches de dépenses' };
 
-const S = { me: null, departments: [], items: [], users: [], expenseRefs: null, view: null, filter: 'tous', groupBySite: false };
+const S = { me: null, departments: [], items: [], users: [], expenseRefs: null, view: null, tab: 'apercu', filter: 'tous', query: '', sort: 'recent', groupBySite: false };
 const root = document.getElementById('app');
 
 // ---------- Utilitaires ----------
@@ -51,9 +51,35 @@ const lineTotal = (i) => i.unitPrice * i.quantity;
 const sum = (items) => items.reduce((t, i) => t + lineTotal(i), 0);
 const host = (url) => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } };
 
-async function run(fn) {
-  try { await fn(); await refresh(); } catch (e) { if (e.message !== 'Session expirée') alert(e.message); }
+// Petit message temporaire en bas à droite
+function toast(message, kind = 'ok') {
+  let box = document.getElementById('toasts');
+  if (!box) { box = h('div', { id: 'toasts', role: 'status' }); document.body.append(box); }
+  const t = h('div', { class: 'toast ' + kind }, message);
+  box.append(t);
+  setTimeout(() => t.remove(), kind === 'bad' ? 6000 : 3000);
 }
+
+async function run(fn, success) {
+  try { await fn(); await refresh(); if (success) toast(success); }
+  catch (e) { if (e.message !== 'Session expirée') toast(e.message, 'bad'); }
+}
+
+// Confirmation aux couleurs du club ; retourne une promesse (true = confirmé)
+function confirmDialog(message, label = 'Supprimer') {
+  return new Promise((resolve) => {
+    const dlg = h('dialog', {});
+    const done = (v) => { dlg.close(); dlg.remove(); resolve(v); };
+    dlg.append(h('h3', {}, 'Confirmation'), h('p', {}, message),
+      h('div', { class: 'dlg-actions' },
+        h('button', { type: 'button', class: 'btn', autofocus: true, onclick: () => done(false) }, 'Annuler'),
+        h('button', { type: 'button', class: 'btn primary', onclick: () => done(true) }, label)));
+    dlg.addEventListener('cancel', (e) => { e.preventDefault(); done(false); });
+    document.body.append(dlg);
+    dlg.showModal();
+  });
+}
+const confirmDelete = async (message, fn, success) => { if (await confirmDialog(message)) await run(fn, success); };
 
 // ---------- Connexion ----------
 function renderLogin(error) {
@@ -65,7 +91,7 @@ function renderLogin(error) {
       if (S.me.mustChangePassword) passwordDialog(true);
     } catch (err) { renderLogin(err.message); }
   } },
-  h('img', { src: 'logo.png', class: 'login-logo', alt: 'ChinookOrders' }),
+  h('img', { src: 'logo-nuit.png', class: 'login-logo', alt: 'ChinookOrders' }),
   h('p', {}, "Listes d'achats par département"),
   error && h('div', { class: 'err' }, error),
   h('label', {}, "Nom d'utilisateur", h('input', { name: 'username', autocomplete: 'username', autofocus: true, required: true })),
@@ -75,12 +101,12 @@ function renderLogin(error) {
 }
 
 // ---------- Dialogues ----------
-function dialog(title, body, { onSubmit, submitLabel = 'Enregistrer', cancel = true }) {
+function dialog(title, body, { onSubmit, submitLabel = 'Enregistrer', cancel = true, success }) {
   const dlg = h('dialog', {});
   const err = h('div', { class: 'err', hidden: true });
   const form = h('form', { method: 'dialog', onsubmit: async (e) => {
     e.preventDefault();
-    try { await onSubmit(form); dlg.close(); dlg.remove(); await refresh(); }
+    try { await onSubmit(form); dlg.close(); dlg.remove(); await refresh(); if (success) toast(success); }
     catch (ex) { err.textContent = ex.message; err.hidden = false; }
   } },
   h('h3', {}, title), err, body,
@@ -129,6 +155,7 @@ function itemDialog(item) {
     item && item.status !== 'en_attente' && h('p', { class: 'hint' }, 'Modifier cette pièce la remettra « En attente » d’approbation.'));
   counter.textContent = `${(item?.description || '').length} / 200`;
   dialog(item ? 'Modifier la pièce' : 'Ajouter une pièce', body, {
+    success: item ? 'Pièce modifiée' : 'Pièce ajoutée',
     onSubmit: (f) => {
       const payload = { name: f.name.value, url: f.url.value, unitPrice: f.unitPrice.value, quantity: f.quantity.value,
         accountNumber: f.accountNumber.value, description: f.description.value };
@@ -142,6 +169,7 @@ function itemDialog(item) {
 function rejectDialog(item) {
   dialog('Refuser « ' + item.name + ' »', h('label', {}, 'Motif (facultatif)', h('input', { name: 'reason', maxLength: 300 })), {
     submitLabel: 'Refuser',
+    success: 'Pièce refusée',
     onSubmit: (f) => api('POST', `/api/items/${item.id}/status`, { status: 'refuse', reason: f.reason.value }),
   });
 }
@@ -151,7 +179,7 @@ function passwordDialog(forced) {
     h('div', {},
       h('label', {}, 'Mot de passe actuel', h('input', { name: 'old', type: 'password', required: true, autocomplete: 'current-password' })),
       h('label', {}, 'Nouveau mot de passe', h('input', { name: 'nw', type: 'password', required: true, minLength: 4, autocomplete: 'new-password' }))),
-    { cancel: !forced, onSubmit: (f) => api('POST', '/api/password', { oldPassword: f.old.value, newPassword: f.nw.value }) });
+    { cancel: !forced, success: 'Mot de passe changé', onSubmit: (f) => api('POST', '/api/password', { oldPassword: f.old.value, newPassword: f.nw.value }) });
 }
 
 function userDialog(user) {
@@ -167,6 +195,7 @@ function userDialog(user) {
         S.departments.map((d) => h('option', { value: d.id, selected: user?.departmentId === d.id }, d.name))))),
     h('p', { class: 'hint' }, 'Membre : voit et alimente son département. Approbateur : voit tout, approuve/refuse et marque « commandé ». Administrateur : en plus, gère utilisateurs et départements. Générateur de fiches de dépenses : génère les numéros de référence CHI26XX (aucun département requis).'));
   dialog(user ? 'Modifier ' + user.name : 'Nouvel utilisateur', body, {
+    success: user ? 'Utilisateur modifié' : 'Utilisateur créé',
     onSubmit: (f) => {
       const payload = { name: f.name.value, role: f.role.value, departmentId: f.departmentId.value, password: f.password.value };
       if (user) return api('PUT', '/api/users/' + user.id, payload);
@@ -181,12 +210,9 @@ function render() {
   if (!S.me) return renderLogin();
   root.replaceChildren(
     h('div', { class: 'topbar' },
-      h('img', { src: 'logo.png', class: 'logo', alt: '' }),
+      h('img', { src: 'logo-nuit.png', class: 'logo', alt: '' }),
       h('h1', {}, 'ChinookOrders'),
-      h('span', { class: 'who' }, `${S.me.name} · ${ROLE_LABEL[S.me.role]}`),
-      h('button', { class: 'btn sm', title: 'Recharger les données (utile si le fichier est partagé)', onclick: () => run(async () => {}) }, 'Actualiser'),
-      h('button', { class: 'btn sm', onclick: () => passwordDialog(false) }, 'Mot de passe'),
-      h('button', { class: 'btn sm', onclick: async () => { await api('POST', '/api/logout'); S.me = null; renderLogin(); } }, 'Déconnexion')),
+      h('button', { class: 'btn sm', title: 'Recharger les données (utile si le fichier est partagé)', onclick: () => run(async () => {}, 'Données actualisées') }, 'Actualiser')),
     h('div', { class: 'layout' }, renderSide(), S.view === 'admin' ? renderAdmin() : S.view === 'refs' ? renderRefs() : renderItems()));
 }
 
@@ -199,7 +225,7 @@ function renderRefs() {
     h('div', { class: 'head' }, h('h2', {}, 'Fiches de dépenses'),
       h('button', { class: 'btn primary', onclick: () => run(async () => {
         const r = await api('POST', '/api/refs/generate');
-        alert('Nouveau numéro de référence : ' + r.ref);
+        dialog('Nouveau numéro de référence', h('p', { class: 'newref' }, r.ref), { submitLabel: 'OK', cancel: false, onSubmit: async () => {} });
       }) }, '+ Générer un nouveau numéro')),
     h('div', { class: 'totals' },
       h('div', { class: 'tile main-total' }, h('div', { class: 'lbl' }, 'Dernier numéro utilisé'), h('div', { class: 'val' }, last ? last.ref : '—'),
@@ -209,10 +235,10 @@ function renderRefs() {
       refs.length === 0 ? h('div', { class: 'empty' }, 'Aucun numéro pour le moment.') : refs.map((r) => h('div', { class: 'row' },
         h('strong', { class: 'ref' }, r.ref),
         h('span', { class: 'grow note' }, `${dateFmt(r.createdAt)} · ${userName(r.createdBy)}${r.imported ? ' · ajouté manuellement' : ''}`),
-        S.me.role === 'admin' && h('button', { class: 'btn sm danger', onclick: () => { if (confirm(`Supprimer ${r.ref} ?`)) run(() => api('DELETE', '/api/refs/' + r.id)); } }, 'Supprimer')))),
+        S.me.role === 'admin' && h('button', { class: 'btn sm danger', onclick: () => confirmDelete(`Supprimer ${r.ref} ?`, () => api('DELETE', '/api/refs/' + r.id), 'Numéro supprimé') }, 'Supprimer')))),
     h('div', { class: 'panel' }, h('h3', {}, 'Ajouter un numéro déjà utilisé'),
       h('p', { class: 'note', style: 'margin:0 0 8px' }, 'Pour reprendre l’historique d’avant l’application : le prochain numéro généré continuera après le plus élevé.'),
-      h('form', { class: 'inline', onsubmit: (e) => { e.preventDefault(); if (addInput.value.trim()) run(() => api('POST', '/api/refs', { ref: addInput.value })); } },
+      h('form', { class: 'inline', onsubmit: (e) => { e.preventDefault(); if (addInput.value.trim()) run(() => api('POST', '/api/refs', { ref: addInput.value }), 'Numéro ajouté'); } },
         addInput, h('button', { class: 'btn' }, 'Ajouter'))));
 }
 function nextRef(last) {
@@ -221,120 +247,159 @@ function nextRef(last) {
   return last.prefix + String(last.number + 1).padStart(2, '0');
 }
 
+const ICONS = {
+  "grid": "<rect x=\"3\" y=\"3\" width=\"7\" height=\"7\" rx=\"1\"/><rect x=\"14\" y=\"3\" width=\"7\" height=\"7\" rx=\"1\"/><rect x=\"3\" y=\"14\" width=\"7\" height=\"7\" rx=\"1\"/><rect x=\"14\" y=\"14\" width=\"7\" height=\"7\" rx=\"1\"/>",
+  "clock": "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 7v5l3 2\"/>",
+  "folder": "<path d=\"M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z\"/>",
+  "receipt": "<path d=\"M6 3h12v18l-3-2-3 2-3-2-3 2z\"/><path d=\"M9 8h6M9 12h6\"/>",
+  "settings": "<path d=\"M4 7h10M18 7h2M4 17h2M10 17h10\"/><circle cx=\"16\" cy=\"7\" r=\"2\"/><circle cx=\"8\" cy=\"17\" r=\"2\"/>",
+  "key": "<circle cx=\"8\" cy=\"15\" r=\"4\"/><path d=\"M11 12l9-9M17 6l3 3\"/>",
+  "logout": "<path d=\"M10 4H5v16h5M15 8l4 4-4 4M19 12H9\"/>"
+};
+function icon(name) {
+  const span = h('span', { class: 'ico' });
+  span.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
+  return span;
+}
+
+function go(view, { tab = 'apercu', filter = 'tous' } = {}) {
+  Object.assign(S, { view, tab, filter, query: '' });
+  render();
+}
+
 function renderSide() {
-  const nav = (view, label, amount, extra) => h('button', {
-    class: S.view === view && !extra ? 'active' : '',
-    onclick: () => { S.view = view; S.filter = extra || 'tous'; render(); },
-  }, h('span', {}, label), amount != null && h('span', { class: 'amt' }, amount));
+  const nav = (ico, label, onclick, { active, amount, badge } = {}) => h('button', { class: active ? 'active' : '', onclick },
+    icon(ico), h('span', { class: 'grow' }, label),
+    amount != null && h('span', { class: 'amt' }, amount),
+    badge > 0 && h('span', { class: 'badge en_attente' }, badge));
   const pending = S.items.filter((i) => i.status === 'en_attente').length;
   const live = (items) => sum(items.filter((i) => i.status !== 'refuse'));
+  const logout = async () => { await api('POST', '/api/logout'); S.me = null; renderLogin(); };
   return h('nav', { class: 'side' },
-    canApprove() && nav('all', 'Tous les départements', money(live(S.items))),
-    canApprove() && pending > 0 && h('button', {
-      onclick: () => { S.view = 'all'; S.filter = 'en_attente'; render(); },
-    }, h('span', {}, '⏳ À approuver'), h('span', { class: 'badge en_attente' }, pending)),
-    canApprove() && h('hr'),
-    S.departments.map((d) => nav('dept:' + d.id, d.name, money(live(S.items.filter((i) => i.departmentId === d.id))))),
-    canGenerate() && (S.departments.length > 0) && h('hr'),
-    canGenerate() && nav('refs', '🧾 Fiches de dépenses', S.expenseRefs ? S.expenseRefs.length + ' n°' : null),
-    S.me.role === 'admin' && h('hr'),
-    S.me.role === 'admin' && nav('admin', '⚙ Administration'));
+    canApprove() && nav('grid', 'Tous les départements', () => go('all'), { active: S.view === 'all', amount: money(live(S.items)) }),
+    canApprove() && pending > 0 && nav('clock', 'À approuver', () => go('all', { tab: 'pieces', filter: 'en_attente' }), { badge: pending }),
+    S.departments.length > 0 && h('div', { class: 'side-title' }, 'Départements'),
+    S.departments.map((d) => nav('folder', d.name, () => go('dept:' + d.id), { active: S.view === 'dept:' + d.id, amount: money(live(S.items.filter((i) => i.departmentId === d.id))) })),
+    (canGenerate() || S.me.role === 'admin') && h('hr'),
+    canGenerate() && nav('receipt', 'Fiches de dépenses', () => go('refs'), { active: S.view === 'refs', amount: S.expenseRefs ? S.expenseRefs.length + ' n°' : null }),
+    S.me.role === 'admin' && nav('settings', 'Administration', () => go('admin'), { active: S.view === 'admin' }),
+    h('div', { class: 'side-foot' },
+      h('div', { class: 'who' }, h('strong', {}, S.me.name), ROLE_LABEL[S.me.role] !== S.me.name && h('span', {}, ROLE_LABEL[S.me.role])),
+      nav('key', 'Mot de passe', () => passwordDialog(false)),
+      nav('logout', 'Déconnexion', logout)));
 }
+
+const SORTS = {
+  recent: ['Plus récentes', (a, b) => b.createdAt - a.createdAt],
+  ancien: ['Plus anciennes', (a, b) => a.createdAt - b.createdAt],
+  cher: ['Total le plus élevé', (a, b) => lineTotal(b) - lineTotal(a)],
+  moins: ['Total le moins élevé', (a, b) => lineTotal(a) - lineTotal(b)],
+  nom: ['Nom (A à Z)', (a, b) => a.name.localeCompare(b.name, 'fr')],
+};
+// Recherche sans tenir compte des majuscules ni des accents
+const fold = (t) => String(t || '').normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
 
 function renderItems() {
   const deptId = S.view.startsWith('dept:') ? S.view.slice(5) : null;
   const scope = deptId ? S.items.filter((i) => i.departmentId === deptId) : S.items;
   const by = (s) => scope.filter((i) => i.status === s);
-  const shown = (S.filter === 'tous' ? scope : by(S.filter)).slice().sort((a, b) => b.createdAt - a.createdAt);
   const title = deptId ? deptName(deptId) : 'Tous les départements';
   const live = scope.filter((i) => i.status !== 'refuse');
+  const showOverview = !deptId && S.view === 'all' && S.tab === 'apercu';
 
   const tile = (cls, lbl, val, sub) => h('div', { class: 'tile ' + cls }, h('div', { class: 'lbl' }, lbl), h('div', { class: 'val' }, val), sub && h('div', { class: 'sub' }, sub));
   const count = (n) => `${n} pièce${n > 1 ? 's' : ''}`;
+  const tab = (id, label) => h('button', { class: S.tab === id ? 'active' : '', onclick: () => { S.tab = id; render(); } }, label);
 
   return h('main', { class: 'main' },
     h('div', { class: 'head' },
       h('h2', {}, title),
-      h('label', { style: 'margin:0;display:flex;gap:6px;align-items:center' },
-        h('input', { type: 'checkbox', style: 'width:auto;margin:0', checked: S.groupBySite, onchange: (e) => { S.groupBySite = e.target.checked; render(); } }),
-        'Grouper par site'),
       (deptId || S.me.departmentId || S.departments.length > 0) && h('button', { class: 'btn primary', onclick: () => itemDialog() }, '+ Ajouter une pièce')),
+    !deptId && h('div', { class: 'tabs' }, tab('apercu', 'Vue d’ensemble'), tab('pieces', `Pièces (${scope.length})`)),
     h('div', { class: 'totals' },
-      tile('main-total', 'Total global (hors livraison)', money(sum(live)), count(live.length) + ' · refusés exclus'),
-      tile('', 'En attente', money(sum(by('en_attente'))), count(by('en_attente').length)),
-      tile('', 'Approuvé, à commander', money(sum(by('approuve'))), count(by('approuve').length)),
-      tile('', 'Déjà commandé', money(sum(by('commande'))), count(by('commande').length))),
-    !deptId && S.view === 'all' && renderOverview(),
+      tile('main-total', 'Total (hors livraison)', money(sum(live)), count(live.length) + ' · refusés exclus'),
+      tile('', 'À approuver', money(sum(by('en_attente'))), count(by('en_attente').length)),
+      tile('', 'À commander', money(sum(by('approuve'))), count(by('approuve').length)),
+      tile('', 'Commandé', money(sum(by('commande'))), count(by('commande').length))),
+    showOverview ? renderOverview() : renderList(scope, !deptId));
+}
+
+function renderList(scope, showDept) {
+  const by = (s) => scope.filter((i) => i.status === s);
+  const results = h('div', {});
+  // Seuls les résultats sont redessinés : le champ de recherche garde le curseur
+  const paint = () => {
+    const q = fold(S.query.trim());
+    const shown = (S.filter === 'tous' ? scope : by(S.filter))
+      .filter((i) => !q || fold([i.name, i.description, host(i.url), i.accountNumber].join(' ')).includes(q))
+      .sort(SORTS[S.sort][1]);
+    results.replaceChildren(shown.length === 0
+      ? h('div', { class: 'tablewrap' }, h('div', { class: 'empty' }, q ? 'Aucune pièce ne correspond à la recherche.' : 'Aucune pièce ici pour le moment.'))
+      : renderTable(shown, showDept));
+  };
+  paint();
+  return h('div', {},
+    h('div', { class: 'toolbar' },
+      h('input', { type: 'search', class: 'search', placeholder: 'Chercher : nom, site, n° de compte…', value: S.query, oninput: (e) => { S.query = e.target.value; paint(); } }),
+      h('select', { class: 'sort', title: 'Trier', onchange: (e) => { S.sort = e.target.value; paint(); } },
+        Object.entries(SORTS).map(([v, [l]]) => h('option', { value: v, selected: S.sort === v }, l))),
+      h('label', { class: 'check' },
+        h('input', { type: 'checkbox', checked: S.groupBySite, onchange: (e) => { S.groupBySite = e.target.checked; paint(); } }),
+        'Grouper par site')),
     h('div', { class: 'filters' },
       ['tous', 'en_attente', 'approuve', 'commande', 'refuse'].map((f) => h('button', {
         class: 'chip' + (S.filter === f ? ' active' : ''),
         onclick: () => { S.filter = f; render(); },
       }, f === 'tous' ? `Tous (${scope.length})` : `${STATUS_LABEL[f]} (${by(f).length})`))),
-    shown.length === 0
-      ? h('div', { class: 'tablewrap' }, h('div', { class: 'empty' }, 'Aucune pièce ici pour le moment.'))
-      : renderTable(shown, !deptId));
+    results);
 }
 
-// Courbe cumulée du coût (hors refusés) dans le temps : un seul tracé SVG, sans librairie.
-function sparkline(items) {
-  const W = 200, H = 46, pad = 3;
-  const pts = items.filter((i) => i.status !== 'refuse').sort((a, b) => a.createdAt - b.createdAt);
-  const span = h('span', { class: 'spark' });
-  if (pts.length < 2) { span.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><line x1="0" y1="${H - pad}" x2="${W}" y2="${H - pad}" class="spark-flat"/></svg>`; return span; }
-  let acc = 0;
-  const cum = pts.map((i) => (acc += lineTotal(i)));
-  const t0 = pts[0].createdAt, t1 = pts[pts.length - 1].createdAt || t0 + 1;
-  const x = (t) => (t1 === t0 ? W : ((t - t0) / (t1 - t0)) * W);
-  const y = (v) => H - pad - (v / acc) * (H - 2 * pad);
-  const line = pts.map((p, k) => `${k ? 'L' : 'M'}${x(p.createdAt).toFixed(1)},${y(cum[k]).toFixed(1)}`).join('');
-  span.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">`
-    + `<path d="${line}L${W},${H}L0,${H}Z" class="spark-area"/><path d="${line}" class="spark-line"/></svg>`;
-  return span;
-}
-
-// Vue d'ensemble : une carte par département (coût, pièces, statuts, évolution) + indicateurs clés.
+// Vue d'ensemble : une carte par département (coût, part du budget, statuts).
 function renderOverview() {
-  if (S.departments.length === 0 || S.items.length === 0) return null;
+  if (S.departments.length === 0 || S.items.length === 0) return h('div', { class: 'tablewrap' }, h('div', { class: 'empty' }, 'Aucune pièce pour le moment.'));
   const live = (items) => items.filter((i) => i.status !== 'refuse');
   const globalCost = sum(live(S.items));
   const stats = S.departments.map((d) => {
     const items = S.items.filter((i) => i.departmentId === d.id);
     const n = (s) => items.filter((i) => i.status === s).length;
-    return { d, items, cost: sum(live(items)), count: items.length,
+    return { d, cost: sum(live(items)), count: items.length,
       st: { en_attente: n('en_attente'), approuve: n('approuve'), commande: n('commande'), refuse: n('refuse') } };
   }).sort((a, b) => b.cost - a.cost);
-
-  const liveAll = live(S.items);
-  const decided = S.items.filter((i) => i.status !== 'en_attente');
-  const accepted = decided.filter((i) => i.status !== 'refuse').length;
-  const top = stats[0];
-  const kpi = (lbl, val, sub) => h('div', { class: 'tile' }, h('div', { class: 'lbl' }, lbl), h('div', { class: 'val' }, val), sub && h('div', { class: 'sub' }, sub));
 
   const card = (s) => {
     const pct = globalCost ? Math.round((s.cost / globalCost) * 100) : 0;
     const total = s.count || 1;
-    return h('button', { class: 'dcard', title: `Ouvrir ${s.d.name}`, onclick: () => { S.view = 'dept:' + s.d.id; S.filter = 'tous'; render(); } },
-      h('div', { class: 'dc-head' }, h('span', { class: 'dc-name' }, s.d.name),
-        s.st.en_attente > 0 && h('span', { class: 'badge en_attente' }, s.st.en_attente + ' à approuver')),
-      h('div', { class: 'dc-main' }, h('span', { class: 'dc-cost' }, money(s.cost)), h('span', { class: 'dc-pct' }, pct + ' % du total')),
-      h('div', { class: 'dc-sub' }, `${s.count} pièce${s.count > 1 ? 's' : ''}`
-        + (s.count ? ` · moy. ${money(s.cost / Math.max(1, s.items.filter((i) => i.status !== 'refuse').length))}` : '')),
-      sparkline(s.items),
+    return h('button', { class: 'dcard', title: `Ouvrir ${s.d.name}`, onclick: () => go('dept:' + s.d.id) },
+      h('div', { class: 'dc-name' }, s.d.name),
+      h('div', { class: 'dc-cost' }, money(s.cost)),
+      h('div', { class: 'share' }, h('i', { style: `width:${pct}%` })),
+      h('div', { class: 'dc-sub' }, `${pct} % du budget total · ${s.count} pièce${s.count > 1 ? 's' : ''}`),
+      s.st.en_attente > 0 && h('div', {}, h('span', { class: 'badge en_attente' }, s.st.en_attente + ' à approuver')),
       h('div', { class: 'stackbar', title: `En attente ${s.st.en_attente} · Approuvé ${s.st.approuve} · Commandé ${s.st.commande} · Refusé ${s.st.refuse}` },
         ['en_attente', 'approuve', 'commande', 'refuse'].map((k) => s.st[k] > 0 && h('i', { class: k, style: `width:${(s.st[k] / total) * 100}%` }))));
   };
 
   return h('section', { class: 'overview' },
-    h('div', { class: 'totals' },
-      kpi('Départements actifs', stats.filter((s) => s.count > 0).length + ' / ' + stats.length, `${S.items.length} pièces au total`),
-      kpi('Coût moyen / pièce', money(liveAll.length ? globalCost / liveAll.length : 0), 'refusés exclus'),
-      kpi('Plus gros budget', top.d.name, money(top.cost)),
-      kpi("Taux d'approbation", decided.length ? Math.round((accepted / decided.length) * 100) + ' %' : '—', `${decided.length} décision${decided.length > 1 ? 's' : ''} prise${decided.length > 1 ? 's' : ''}`)),
     h('h3', { class: 'ov-title' }, 'Par département'),
     h('div', { class: 'dgrid' }, stats.map(card)),
-    h('div', { class: 'legend' },
-      ['en_attente', 'approuve', 'commande', 'refuse'].map((k) => h('span', {}, h('i', { class: k }), STATUS_LABEL[k])),
-      h('span', { class: 'note' }, '· courbe = coût cumulé dans le temps')));
+    h('div', { class: 'legend' }, h('span', {}, 'Barre du bas, statut des pièces :'),
+      ['en_attente', 'approuve', 'commande', 'refuse'].map((k) => h('span', {}, h('i', { class: k }), STATUS_LABEL[k]))));
+}
+
+// Menu « ⋯ » d'une ligne (popover natif : jamais coupé par le défilement du tableau)
+function rowMenu(name, entries) {
+  const pop = h('div', { class: 'menu', popover: 'auto' },
+    entries.map(([label, cls, fn]) => h('button', { type: 'button', class: cls, onclick: () => { pop.hidePopover(); fn(); } }, label)));
+  const btn = h('button', { type: 'button', class: 'btn sm more', title: 'Autres actions', 'aria-label': 'Autres actions pour ' + name }, '⋯');
+  btn.popoverTargetElement = pop;
+  pop.addEventListener('toggle', (e) => {
+    if (e.newState !== 'open') return;
+    const r = btn.getBoundingClientRect();
+    const below = r.bottom + 4 + pop.offsetHeight <= window.innerHeight;
+    pop.style.top = (below ? r.bottom + 4 : r.top - 4 - pop.offsetHeight) + 'px';
+    pop.style.left = (r.right - pop.offsetWidth) + 'px';
+  });
+  return [btn, pop];
 }
 
 function renderTable(items, showDept) {
@@ -359,9 +424,23 @@ function itemRow(i, showDept) {
   const approver = canApprove();
   const canEdit = i.status !== 'commande' && (approver || (mine && i.status !== 'approuve'));
   const canDelete = approver || (mine && i.status === 'en_attente');
-  const act = (label, cls, fn) => h('button', { class: 'btn sm ' + cls, onclick: fn }, label);
-  const setStatus = (status) => run(() => api('POST', `/api/items/${i.id}/status`, { status }));
-  const del = () => { if (confirm(`Supprimer « ${i.name} » ?`)) run(() => api('DELETE', '/api/items/' + i.id)); };
+  const setStatus = (status, msg) => run(() => api('POST', `/api/items/${i.id}/status`, { status }), msg);
+  const del = () => confirmDelete(`Supprimer « ${i.name} » ?`, () => api('DELETE', '/api/items/' + i.id), 'Pièce supprimée');
+  const backToPending = () => setStatus('en_attente', 'Pièce remise en attente');
+
+  // Action principale visible ; le reste dans le menu « ⋯ »
+  const main = !approver ? null
+    : i.status === 'en_attente' ? ['Approuver', 'ok', () => setStatus('approuve', 'Pièce approuvée')]
+    : i.status === 'approuve' ? ['Marquer commandé', 'primary', () => setStatus('commande', 'Pièce marquée comme commandée')]
+    : i.status === 'refuse' ? ['Remettre en attente', '', backToPending]
+    : null;
+  const more = [
+    approver && i.status === 'en_attente' && ['Refuser', 'danger', () => rejectDialog(i)],
+    canEdit && ['Modifier', '', () => itemDialog(i)],
+    approver && i.status === 'approuve' && ['Remettre en attente', '', backToPending],
+    approver && i.status === 'commande' && ['Annuler commande', '', () => setStatus('approuve', 'Commande annulée')],
+    canDelete && ['Supprimer', 'danger', del],
+  ].filter(Boolean);
 
   const meta = [
     showDept && deptName(i.departmentId),
@@ -375,25 +454,18 @@ function itemRow(i, showDept) {
       i.description && h('div', { class: 'note' }, i.description),
       i.status === 'refuse' && i.rejectReason && h('div', { class: 'note keep' }, 'Motif : ' + i.rejectReason),
       h('div', { class: 'dept-tag' }, meta)),
-    h('td', {}, i.url ? h('a', { href: i.url, target: '_blank', rel: 'noopener noreferrer' }, host(i.url) + ' ↗') : '—'),
+    h('td', {}, i.url ? h('a', { class: 'site', href: i.url, target: '_blank', rel: 'noopener noreferrer' }, host(i.url) + ' ↗') : '—'),
     h('td', { class: 'num' }, money(i.unitPrice)),
     h('td', { class: 'num' }, i.quantity),
     h('td', { class: 'num' }, h('strong', {}, money(lineTotal(i)))),
     h('td', { class: 'keep' }, h('span', { class: 'badge ' + i.status }, STATUS_LABEL[i.status])),
     h('td', { class: 'keep' }, h('div', { class: 'actions' },
-      approver && i.status === 'en_attente' && act('Approuver', 'ok', () => setStatus('approuve')),
-      approver && i.status === 'en_attente' && act('Refuser', 'danger', () => rejectDialog(i)),
-      approver && i.status === 'approuve' && act('Marquer commandé', 'primary', () => setStatus('commande')),
-      approver && i.status === 'approuve' && act('Remettre en attente', '', () => setStatus('en_attente')),
-      approver && i.status === 'refuse' && act('Remettre en attente', '', () => setStatus('en_attente')),
-      approver && i.status === 'commande' && act('Annuler commande', '', () => setStatus('approuve')),
-      canEdit && act('Modifier', '', () => itemDialog(i)),
-      canDelete && act('Supprimer', 'danger', del))));
+      main && h('button', { class: 'btn sm ' + main[1], onclick: main[2] }, main[0]),
+      more.length > 0 && rowMenu(i.name, more))));
 }
 
 // ---------- Administration ----------
 function renderAdmin() {
-  const del = (msg, fn) => { if (confirm(msg)) run(fn); };
   const newDept = h('input', { placeholder: 'Nom du nouveau département', maxLength: 80 });
   return h('main', { class: 'main' },
     h('div', { class: 'head' }, h('h2', {}, 'Administration')),
@@ -403,15 +475,15 @@ function renderAdmin() {
         h('span', { class: 'note' }, `${S.items.filter((i) => i.departmentId === d.id).length} pièce(s)`),
         h('button', { class: 'btn sm', onclick: () => dialog('Renommer le département',
           h('label', {}, 'Nouveau nom', h('input', { name: 'name', required: true, maxLength: 80, value: d.name })),
-          { onSubmit: (f) => api('PUT', '/api/departments/' + d.id, { name: f.name.value }) }) }, 'Renommer'),
-        h('button', { class: 'btn sm danger', onclick: () => del(`Supprimer le département « ${d.name} » ?`, () => api('DELETE', '/api/departments/' + d.id)) }, 'Supprimer'))),
-      h('form', { class: 'inline', style: 'margin-top:10px', onsubmit: (e) => { e.preventDefault(); if (newDept.value.trim()) run(() => api('POST', '/api/departments', { name: newDept.value })); } },
+          { success: 'Département renommé', onSubmit: (f) => api('PUT', '/api/departments/' + d.id, { name: f.name.value }) }) }, 'Renommer'),
+        h('button', { class: 'btn sm danger', onclick: () => confirmDelete(`Supprimer le département « ${d.name} » ?`, () => api('DELETE', '/api/departments/' + d.id), 'Département supprimé') }, 'Supprimer'))),
+      h('form', { class: 'inline', style: 'margin-top:10px', onsubmit: (e) => { e.preventDefault(); if (newDept.value.trim()) run(() => api('POST', '/api/departments', { name: newDept.value }), 'Département ajouté'); } },
         newDept, h('button', { class: 'btn primary' }, 'Ajouter'))),
     h('div', { class: 'panel' }, h('h3', {}, 'Utilisateurs'),
       S.users.map((u) => h('div', { class: 'row' },
         h('span', { class: 'grow' }, h('strong', {}, u.name), ` (${u.username}) `, h('span', { class: 'note' }, `${ROLE_LABEL[u.role]}${u.departmentId ? ' · ' + deptName(u.departmentId) : ''}`)),
         h('button', { class: 'btn sm', onclick: () => userDialog(u) }, 'Modifier'),
-        u.id !== S.me.id && h('button', { class: 'btn sm danger', onclick: () => del(`Supprimer l’utilisateur ${u.name} ?`, () => api('DELETE', '/api/users/' + u.id)) }, 'Supprimer'))),
+        u.id !== S.me.id && h('button', { class: 'btn sm danger', onclick: () => confirmDelete(`Supprimer l’utilisateur ${u.name} ?`, () => api('DELETE', '/api/users/' + u.id), 'Utilisateur supprimé') }, 'Supprimer'))),
       h('div', { style: 'margin-top:10px' }, h('button', { class: 'btn primary', onclick: () => userDialog() }, '+ Nouvel utilisateur'))),
     h('div', { class: 'panel' }, h('h3', {}, 'Emplacement des données'),
       h('p', { class: 'note', style: 'margin:0 0 8px' },
@@ -421,7 +493,7 @@ function renderAdmin() {
         h('button', { class: 'btn sm', onclick: () => window.pont.ouvrirDossierDonnees() }, 'Ouvrir'),
         h('button', { class: 'btn sm', onclick: async () => {
           const r = await window.pont.choisirDossierDonnees();
-          if (!r.ok) alert(r.error); else if (r.changed) await refresh();
+          if (!r.ok) toast(r.error, 'bad'); else if (r.changed) await refresh();
         } }, 'Changer…'))));
 }
 

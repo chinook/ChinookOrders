@@ -7,9 +7,7 @@ const core = require('./core');
 if (!app.requestSingleInstanceLock()) app.quit();
 
 const HAUTEUR_BARRE = 36;
-const couleursBarre = () => (nativeTheme.shouldUseDarkColors
-  ? { color: '#1b2030', symbolColor: '#e8ebf3', height: HAUTEUR_BARRE }
-  : { color: '#ffffff', symbolColor: '#1d2433', height: HAUTEUR_BARRE });
+const couleursBarre = () => ({ color: '#0F2548', symbolColor: '#E8DED4', height: HAUTEUR_BARRE });
 
 // Emplacement des données (modifiable par l'administrateur, p. ex. dossier partagé)
 const configFile = () => path.join(app.getPath('userData'), 'config.json');
@@ -25,7 +23,7 @@ function createWindow() {
     titleBarStyle: 'hidden',
     titleBarOverlay: couleursBarre(),
     icon: path.join(__dirname, 'build', 'icon.png'),
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#12151c' : '#f4f6f9',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#081730' : '#F5F1EC',
     webPreferences: { contextIsolation: true, preload: path.join(__dirname, 'preload.js') },
   });
 
